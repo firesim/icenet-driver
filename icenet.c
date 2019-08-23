@@ -1,3 +1,4 @@
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/circ_buf.h>
@@ -35,18 +36,20 @@
 #define DMA_LEN_ALIGN(n) (((((n) - 1) >> ALIGN_SHIFT) + 1) << ALIGN_SHIFT)
 #define MACADDR_BYTES 6
 
+#define ICENET_RING_SIZE 64
+
 struct sk_buff_cq_entry {
 	struct sk_buff *skb;
 };
 
 struct sk_buff_cq {
-	struct sk_buff_cq_entry entries[CONFIG_ICENET_RING_SIZE];
+	struct sk_buff_cq_entry entries[ICENET_RING_SIZE];
 	int head;
 	int tail;
 };
 
-#define SK_BUFF_CQ_COUNT(cq) CIRC_CNT(cq.head, cq.tail, CONFIG_ICENET_RING_SIZE)
-#define SK_BUFF_CQ_SPACE(cq) CIRC_SPACE(cq.head, cq.tail, CONFIG_ICENET_RING_SIZE)
+#define SK_BUFF_CQ_COUNT(cq) CIRC_CNT(cq.head, cq.tail, ICENET_RING_SIZE)
+#define SK_BUFF_CQ_SPACE(cq) CIRC_SPACE(cq.head, cq.tail, ICENET_RING_SIZE)
 
 static inline void sk_buff_cq_init(struct sk_buff_cq *cq)
 {
@@ -58,7 +61,7 @@ static inline void sk_buff_cq_push(
 		struct sk_buff_cq *cq, struct sk_buff *skb)
 {
 	cq->entries[cq->head].skb = skb;
-	cq->head = (cq->head + 1) & (CONFIG_ICENET_RING_SIZE - 1);
+	cq->head = (cq->head + 1) & (ICENET_RING_SIZE - 1);
 }
 
 static inline struct sk_buff *sk_buff_cq_pop(struct sk_buff_cq *cq)
@@ -66,7 +69,7 @@ static inline struct sk_buff *sk_buff_cq_pop(struct sk_buff_cq *cq)
 	struct sk_buff *skb;
 
 	skb = cq->entries[cq->tail].skb;
-	cq->tail = (cq->tail + 1) & (CONFIG_ICENET_RING_SIZE - 1);
+	cq->tail = (cq->tail + 1) & (ICENET_RING_SIZE - 1);
 
 	return skb;
 }
@@ -488,4 +491,6 @@ static struct platform_driver icenet_driver = {
 	.remove = icenet_remove
 };
 
-builtin_platform_driver(icenet_driver);
+module_platform_driver(icenet_driver);
+MODULE_DESCRIPTION("Drives the FireChip IceNIC ethernet device (used in firesim)");
+MODULE_LICENSE("GPL");
