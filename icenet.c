@@ -20,6 +20,11 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 
+/* Can't add new CONFIG parameters in an external module, so define them here */
+#define ICENET_MTU 1500
+#define ICENET_RING_SIZE 64
+#define ICENET_CHECKSUM
+
 #define ICENET_NAME "icenet"
 #define ICENET_SEND_REQ 0
 #define ICENET_RECV_REQ 8
@@ -28,20 +33,22 @@
 #define ICENET_COUNTS 20
 #define ICENET_MACADDR 24
 #define ICENET_INTMASK 32
+#define ICENET_TXCSUM_REQ 40
+#define ICENET_RXCSUM_RES 48
+#define ICENET_CSUM_ENABLE 49
 
 #define ICENET_INTMASK_TX 1
 #define ICENET_INTMASK_RX 2
 #define ICENET_INTMASK_BOTH 3
 
+#define ETH_HEADER_BYTES 14
 #define ALIGN_BYTES 8
 #define ALIGN_MASK 0x7
 #define ALIGN_SHIFT 3
-#define MAX_FRAME_SIZE (190 * ALIGN_BYTES)
+#define MAX_FRAME_SIZE (ICENET_MTU + ETH_HEADER_BYTES + NET_IP_ALIGN)
 #define DMA_PTR_ALIGN(p) ((typeof(p)) (__ALIGN_KERNEL((uintptr_t) (p), ALIGN_BYTES)))
 #define DMA_LEN_ALIGN(n) (((((n) - 1) >> ALIGN_SHIFT) + 1) << ALIGN_SHIFT)
 #define MACADDR_BYTES 6
-
-#define ICENET_RING_SIZE 64
 
 struct sk_buff_cq_entry {
 	struct sk_buff *skb;
@@ -91,6 +98,7 @@ static inline int sk_buff_cq_tail_nsegments(struct sk_buff_cq *cq)
 struct icenet_device {
 	struct device *dev;
 	void __iomem *iomem;
+	struct napi_struct napi;
 	struct sk_buff_cq send_cq;
 	struct sk_buff_cq recv_cq;
 	spinlock_t tx_lock;
@@ -160,6 +168,19 @@ static inline void post_send(
 	addr -= NET_IP_ALIGN;
 	len += NET_IP_ALIGN;
 
+#ifdef ICENET_CHECKSUM
+	if (skb->ip_summed == CHECKSUM_PARTIAL) {
+		uint64_t start, offset, csum_req;
+		start = skb_checksum_start_offset(skb) + NET_IP_ALIGN;
+		offset = start + skb->csum_offset;
+		csum_req = (1L << 48) | (offset << 32) | (start << 16);
+		iowrite64(csum_req, nic->iomem + ICENET_TXCSUM_REQ);
+		skb->ip_summed = CHECKSUM_NONE;
+	} else {
+		iowrite64(0, nic->iomem + ICENET_TXCSUM_REQ);
+	}
+#endif
+
 	packet = (partial << 63) | (len << 48) | (addr & 0xffffffffffffL);
 	iowrite64(packet, nic->iomem + ICENET_SEND_REQ);
 
@@ -187,12 +208,10 @@ static inline void post_recv(
 	sk_buff_cq_push(&nic->recv_cq, skb);
 }
 
-static inline int send_space(struct icenet_device *nic)
+static inline int send_space(struct icenet_device *nic, int nfrags)
 {
-	int avail = send_req_avail(nic);
-	int space = SK_BUFF_CQ_SPACE(nic->send_cq);
-
-	return (avail < space) ? avail : space;
+	return (send_req_avail(nic) >= nfrags) &&
+		(SK_BUFF_CQ_SPACE(nic->send_cq) > 0);
 }
 
 static void complete_send(struct net_device *ndev)
@@ -201,9 +220,7 @@ static void complete_send(struct net_device *ndev)
 	struct sk_buff *skb;
 	int i, n, nsegs;
 
-	n = send_comp_avail(nic);
-
-	while (n > 0) {
+	for (n = send_comp_avail(nic); n > 0; n -= nsegs) {
 		BUG_ON(SK_BUFF_CQ_COUNT(nic->send_cq) == 0);
 		nsegs = sk_buff_cq_tail_nsegments(&nic->send_cq);
 
@@ -215,34 +232,49 @@ static void complete_send(struct net_device *ndev)
 
 		skb = sk_buff_cq_pop(&nic->send_cq);
 		dev_consume_skb_irq(skb);
-		n -= nsegs;
 	}
 
-	if (send_space(nic) > 0 && netif_queue_stopped(ndev))
+	if (send_space(nic, MAX_SKB_FRAGS) && netif_queue_stopped(ndev)) {
+//		netdev_info(ndev, "starting queue\n");
 		netif_wake_queue(ndev);
+	}
 }
 
-static void complete_recv(struct net_device *ndev)
+static int complete_recv(struct net_device *ndev, int budget)
 {
 	struct icenet_device *nic = netdev_priv(ndev);
 	struct sk_buff *skb;
-	int len;
+	int len, n, i, csum_res;
 
-	while (recv_comp_avail(nic) > 0) {
+	n = recv_comp_avail(nic);
+	if (budget < n) {
+		n = budget;
+	}
+
+	for (i = 0; i < n; i++) {
 		len = ioread16(nic->iomem + ICENET_RECV_COMP);
 		skb = sk_buff_cq_pop(&nic->recv_cq);
 		skb_put(skb, len);
 		skb_pull(skb, NET_IP_ALIGN);
 
+#ifdef ICENET_CHECKSUM
+		csum_res = ioread8(nic->iomem + ICENET_RXCSUM_RES);
+		if (csum_res == 3)
+			skb->ip_summed = CHECKSUM_UNNECESSARY;
+		else if (csum_res == 1)
+			printk(KERN_ERR "IceNet: Checksum offload detected incorrect checksum\n");
+#endif
 		skb->dev = ndev;
 		skb->protocol = eth_type_trans(skb, ndev);
 		ndev->stats.rx_packets++;
 		ndev->stats.rx_bytes += len;
-		netif_rx(skb);
+		netif_receive_skb(skb);
 
 //		printk(KERN_DEBUG "IceNet: rx addr=%p, len=%d\n",
 //				skb->data, len);
 	}
+
+	return n;
 }
 
 static void alloc_recv(struct net_device *ndev)
@@ -259,6 +291,15 @@ static void alloc_recv(struct net_device *ndev)
 	}
 }
 
+static inline void icenet_schedule(struct icenet_device *nic)
+{
+	struct napi_struct *napi = &nic->napi;
+	if (likely(napi_schedule_prep(napi))) {
+		__napi_schedule(napi);
+	}
+}
+
+
 static irqreturn_t icenet_tx_isr(int irq, void *data)
 {
 	struct net_device *ndev = data;
@@ -268,10 +309,10 @@ static irqreturn_t icenet_tx_isr(int irq, void *data)
 		return IRQ_NONE;
 
 	spin_lock(&nic->tx_lock);
-
-	complete_send(ndev);
-
+	clear_intmask(nic, ICENET_INTMASK_TX);
 	spin_unlock(&nic->tx_lock);
+
+	icenet_schedule(nic);
 
 	return IRQ_HANDLED;
 }
@@ -285,13 +326,37 @@ static irqreturn_t icenet_rx_isr(int irq, void *data)
 		return IRQ_NONE;
 
 	spin_lock(&nic->rx_lock);
-
-	complete_recv(ndev);
-	alloc_recv(ndev);
-
+	clear_intmask(nic, ICENET_INTMASK_RX);
 	spin_unlock(&nic->rx_lock);
 
+	icenet_schedule(nic);
+
 	return IRQ_HANDLED;
+}
+
+static int icenet_poll(struct napi_struct *napi, int budget)
+{
+	struct icenet_device *nic;
+	struct net_device *ndev;
+	int work_done;
+	unsigned long flags;
+
+	nic = container_of(napi, struct icenet_device, napi);
+	ndev = dev_get_drvdata(nic->dev);
+
+	spin_lock_irqsave(&nic->tx_lock, flags);
+	complete_send(ndev);
+	spin_unlock_irqrestore(&nic->tx_lock, flags);
+
+	work_done = complete_recv(ndev, budget);
+	alloc_recv(ndev);
+
+	if (work_done < budget) {
+		napi_complete_done(napi, work_done);
+		set_intmask(nic, ICENET_INTMASK_RX);
+	}
+
+	return work_done;
 }
 
 static int icenet_parse_addr(struct net_device *ndev)
@@ -350,12 +415,18 @@ static int icenet_open(struct net_device *ndev)
 	struct icenet_device *nic = netdev_priv(ndev);
 	unsigned long flags;
 
-	spin_lock_irqsave(&nic->rx_lock, flags);
+	napi_enable(&nic->napi);
+
 	alloc_recv(ndev);
-	spin_unlock_irqrestore(&nic->rx_lock, flags);
 
 	netif_start_queue(ndev);
-	set_intmask(nic, ICENET_INTMASK_BOTH);
+
+	spin_lock_irqsave(&nic->rx_lock, flags);
+	set_intmask(nic, ICENET_INTMASK_RX);
+#ifdef ICENET_CHECKSUM
+	iowrite8(1, nic->iomem + ICENET_CSUM_ENABLE);
+#endif
+	spin_unlock_irqrestore(&nic->rx_lock, flags);
 
 	printk(KERN_DEBUG "IceNet: opened device\n");
 
@@ -365,6 +436,8 @@ static int icenet_open(struct net_device *ndev)
 static int icenet_stop(struct net_device *ndev)
 {
 	struct icenet_device *nic = netdev_priv(ndev);
+
+	napi_disable(&nic->napi);
 
 	clear_intmask(nic, ICENET_INTMASK_BOTH);
 	netif_stop_queue(ndev);
@@ -377,18 +450,15 @@ static int icenet_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
 	struct icenet_device *nic = netdev_priv(ndev);
 	unsigned long flags;
-	int space;
 
 	spin_lock_irqsave(&nic->tx_lock, flags);
 
-	space = send_space(nic);
-
-	if (unlikely(space < skb_shinfo(skb)->nr_frags + 1)) {
-		printk(KERN_WARNING "Not enough space in TX ring\n");
+	if (unlikely(!send_space(nic, skb_shinfo(skb)->nr_frags + 1))) {
 		netif_stop_queue(ndev);
 		dev_kfree_skb_any(skb);
 		ndev->stats.tx_dropped++;
 		spin_unlock_irqrestore(&nic->tx_lock, flags);
+		netdev_err(ndev, "insufficient space in Tx ring\n");
 		return NETDEV_TX_BUSY;
 	}
 
@@ -396,6 +466,15 @@ static int icenet_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	post_send(nic, skb);
 	ndev->stats.tx_packets++;
 	ndev->stats.tx_bytes += skb->len;
+
+	if (send_comp_avail(nic) > 32) {
+		icenet_schedule(nic);
+	}
+
+	if (unlikely(!send_space(nic, MAX_SKB_FRAGS))) {
+		netif_stop_queue(ndev);
+		icenet_schedule(nic);
+	}
 
 	spin_unlock_irqrestore(&nic->tx_lock, flags);
 
@@ -438,13 +517,20 @@ static int icenet_probe(struct platform_device *pdev)
 	nic = netdev_priv(ndev);
 	nic->dev = dev;
 
+	netif_napi_add(ndev, &nic->napi, icenet_poll, 64);
 
 	ether_setup(ndev);
 	ndev->flags &= ~IFF_MULTICAST;
 	ndev->netdev_ops = &icenet_ops;
+#ifdef ICENET_CHECKSUM
+	ndev->hw_features = NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
+#else
 	ndev->hw_features = NETIF_F_SG;
+#endif
+
 	ndev->features = ndev->hw_features;
 	ndev->vlan_features = ndev->hw_features;
+	ndev->max_mtu = ICENET_MTU;
 
 	spin_lock_init(&nic->tx_lock);
 	spin_lock_init(&nic->rx_lock);
@@ -476,7 +562,11 @@ static int icenet_probe(struct platform_device *pdev)
 static int icenet_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev;
+	struct icenet_device *nic;
+
 	ndev = platform_get_drvdata(pdev);
+	nic = netdev_priv(ndev);
+	netif_napi_del(&nic->napi);
 	unregister_netdev(ndev);
 	return 0;
 }
