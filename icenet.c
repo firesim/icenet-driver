@@ -21,9 +21,10 @@
 #include <linux/etherdevice.h>
 
 /* Can't add new CONFIG parameters in an external module, so define them here */
-#define ICENET_MTU 1500
-#define ICENET_RING_SIZE 64
-#define ICENET_CHECKSUM
+#define CONFIG_ICENET_MTU 1500
+#define CONFIG_ICENET_RING_SIZE 64
+#define CONFIG_ICENET_CHECKSUM
+#define CONFIG_ICENET_TX_THRESHOLD 16
 
 #define ICENET_NAME "icenet"
 #define ICENET_SEND_REQ 0
@@ -45,7 +46,7 @@
 #define ALIGN_BYTES 8
 #define ALIGN_MASK 0x7
 #define ALIGN_SHIFT 3
-#define MAX_FRAME_SIZE (ICENET_MTU + ETH_HEADER_BYTES + NET_IP_ALIGN)
+#define MAX_FRAME_SIZE (CONFIG_ICENET_MTU + ETH_HEADER_BYTES + NET_IP_ALIGN)
 #define DMA_PTR_ALIGN(p) ((typeof(p)) (__ALIGN_KERNEL((uintptr_t) (p), ALIGN_BYTES)))
 #define DMA_LEN_ALIGN(n) (((((n) - 1) >> ALIGN_SHIFT) + 1) << ALIGN_SHIFT)
 #define MACADDR_BYTES 6
@@ -55,13 +56,13 @@ struct sk_buff_cq_entry {
 };
 
 struct sk_buff_cq {
-	struct sk_buff_cq_entry entries[ICENET_RING_SIZE];
+	struct sk_buff_cq_entry entries[CONFIG_ICENET_RING_SIZE];
 	int head;
 	int tail;
 };
 
-#define SK_BUFF_CQ_COUNT(cq) CIRC_CNT(cq.head, cq.tail, ICENET_RING_SIZE)
-#define SK_BUFF_CQ_SPACE(cq) CIRC_SPACE(cq.head, cq.tail, ICENET_RING_SIZE)
+#define SK_BUFF_CQ_COUNT(cq) CIRC_CNT(cq.head, cq.tail, CONFIG_ICENET_RING_SIZE)
+#define SK_BUFF_CQ_SPACE(cq) CIRC_SPACE(cq.head, cq.tail, CONFIG_ICENET_RING_SIZE)
 
 static inline void sk_buff_cq_init(struct sk_buff_cq *cq)
 {
@@ -73,7 +74,7 @@ static inline void sk_buff_cq_push(
 		struct sk_buff_cq *cq, struct sk_buff *skb)
 {
 	cq->entries[cq->head].skb = skb;
-	cq->head = (cq->head + 1) & (ICENET_RING_SIZE - 1);
+	cq->head = (cq->head + 1) & (CONFIG_ICENET_RING_SIZE - 1);
 }
 
 static inline struct sk_buff *sk_buff_cq_pop(struct sk_buff_cq *cq)
@@ -81,7 +82,7 @@ static inline struct sk_buff *sk_buff_cq_pop(struct sk_buff_cq *cq)
 	struct sk_buff *skb;
 
 	skb = cq->entries[cq->tail].skb;
-	cq->tail = (cq->tail + 1) & (ICENET_RING_SIZE - 1);
+	cq->tail = (cq->tail + 1) & (CONFIG_ICENET_RING_SIZE - 1);
 
 	return skb;
 }
@@ -168,7 +169,7 @@ static inline void post_send(
 	addr -= NET_IP_ALIGN;
 	len += NET_IP_ALIGN;
 
-#ifdef ICENET_CHECKSUM
+#ifdef CONFIG_ICENET_CHECKSUM
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		uint64_t start, offset, csum_req;
 		start = skb_checksum_start_offset(skb) + NET_IP_ALIGN;
@@ -257,7 +258,7 @@ static int complete_recv(struct net_device *ndev, int budget)
 		skb_put(skb, len);
 		skb_pull(skb, NET_IP_ALIGN);
 
-#ifdef ICENET_CHECKSUM
+#ifdef CONFIG_ICENET_CHECKSUM
 		csum_res = ioread8(nic->iomem + ICENET_RXCSUM_RES);
 		if (csum_res == 3)
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -423,7 +424,7 @@ static int icenet_open(struct net_device *ndev)
 
 	spin_lock_irqsave(&nic->rx_lock, flags);
 	set_intmask(nic, ICENET_INTMASK_RX);
-#ifdef ICENET_CHECKSUM
+#ifdef CONFIG_ICENET_CHECKSUM
 	iowrite8(1, nic->iomem + ICENET_CSUM_ENABLE);
 #endif
 	spin_unlock_irqrestore(&nic->rx_lock, flags);
@@ -467,7 +468,7 @@ static int icenet_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 	ndev->stats.tx_packets++;
 	ndev->stats.tx_bytes += skb->len;
 
-	if (send_comp_avail(nic) > 32) {
+	if (send_comp_avail(nic) > CONFIG_ICENET_TX_THRESHOLD) {
 		icenet_schedule(nic);
 	}
 
@@ -522,7 +523,7 @@ static int icenet_probe(struct platform_device *pdev)
 	ether_setup(ndev);
 	ndev->flags &= ~IFF_MULTICAST;
 	ndev->netdev_ops = &icenet_ops;
-#ifdef ICENET_CHECKSUM
+#ifdef CONFIG_ICENET_CHECKSUM
 	ndev->hw_features = NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
 #else
 	ndev->hw_features = NETIF_F_SG;
@@ -530,7 +531,7 @@ static int icenet_probe(struct platform_device *pdev)
 
 	ndev->features = ndev->hw_features;
 	ndev->vlan_features = ndev->hw_features;
-	ndev->max_mtu = ICENET_MTU;
+	ndev->max_mtu = CONFIG_ICENET_MTU;
 
 	spin_lock_init(&nic->tx_lock);
 	spin_lock_init(&nic->rx_lock);
