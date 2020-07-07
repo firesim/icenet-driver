@@ -416,6 +416,11 @@ static int icenet_open(struct net_device *ndev)
 	struct icenet_device *nic = netdev_priv(ndev);
 	unsigned long flags;
 
+#ifdef CONFIG_ICENET_CHECKSUM
+	iowrite8(1, nic->iomem + ICENET_CSUM_ENABLE);
+	mb();
+#endif
+
 	napi_enable(&nic->napi);
 
 	alloc_recv(ndev);
@@ -424,9 +429,6 @@ static int icenet_open(struct net_device *ndev)
 
 	spin_lock_irqsave(&nic->rx_lock, flags);
 	set_intmask(nic, ICENET_INTMASK_RX);
-#ifdef CONFIG_ICENET_CHECKSUM
-	iowrite8(1, nic->iomem + ICENET_CSUM_ENABLE);
-#endif
 	spin_unlock_irqrestore(&nic->rx_lock, flags);
 
 	printk(KERN_DEBUG "IceNet: opened device\n");
