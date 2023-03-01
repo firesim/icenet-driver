@@ -520,7 +520,7 @@ static int icenet_probe(struct platform_device *pdev)
 	nic = netdev_priv(ndev);
 	nic->dev = dev;
 
-	netif_napi_add(ndev, &nic->napi, icenet_poll, 64);
+	netif_napi_add(ndev, &nic->napi, icenet_poll);
 
 	ether_setup(ndev);
 	ndev->flags &= ~IFF_MULTICAST;
