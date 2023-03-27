@@ -490,7 +490,8 @@ static void icenet_init_mac_address(struct net_device *ndev)
 	uint64_t macaddr = ioread64(nic->iomem + ICENET_MACADDR);
 
 	ndev->addr_assign_type = NET_ADDR_PERM;
-	memcpy(ndev->dev_addr, &macaddr, MACADDR_BYTES);
+	ndev->addr_len = MACADDR_BYTES;
+	dev_addr_set(ndev, (void*)&macaddr);
 
 	if (!is_valid_ether_addr(ndev->dev_addr))
 		printk(KERN_WARNING "Invalid MAC address\n");
