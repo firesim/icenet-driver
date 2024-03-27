@@ -576,6 +576,7 @@ static int icenet_remove(struct platform_device *pdev)
 }
 
 static struct of_device_id icenet_of_match[] = {
+	{ .compatible = "ucb-bar,ice-nic" },
 	{ .compatible = "ucbbar,ice-nic" },
 	{}
 };
