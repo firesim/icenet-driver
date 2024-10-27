@@ -25,7 +25,8 @@
 #define CONFIG_ICENET_MTU 9000
 #define CONFIG_ICENET_RING_SIZE 64
 #define CONFIG_ICENET_CHECKSUM
-#define CONFIG_ICENET_TX_THRESHOLD 16
+//#define CONFIG_ICENET_FAKE_CHECKSUM
+#define CONFIG_ICENET_TX_THRESHOLD 32
 
 #define ICENET_NAME "icenet"
 #define ICENET_SEND_REQ 0
@@ -265,6 +266,8 @@ static int complete_recv(struct net_device *ndev, int budget)
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
 		else if (csum_res == 1)
 			printk(KERN_ERR "IceNet: Checksum offload detected incorrect checksum\n");
+#elif defined(CONFIG_ICENET_FAKE_CHECKSUM)
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
 #endif
 		skb->dev = ndev;
 		skb->protocol = eth_type_trans(skb, ndev);
@@ -527,7 +530,7 @@ static int icenet_probe(struct platform_device *pdev)
 	ether_setup(ndev);
 	ndev->flags &= ~IFF_MULTICAST;
 	ndev->netdev_ops = &icenet_ops;
-#ifdef CONFIG_ICENET_CHECKSUM
+#if defined(CONFIG_ICENET_CHECKSUM) || defined(CONFIG_ICENET_FAKE_CHECKSUM)
 	ndev->hw_features = NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_RXCSUM;
 #else
 	ndev->hw_features = NETIF_F_SG;
