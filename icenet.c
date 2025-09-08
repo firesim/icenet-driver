@@ -16,6 +16,7 @@
 #include <linux/of_pci.h>
 #include <linux/of_platform.h>
 #include <linux/of_irq.h>
+#include <linux/platform_device.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -143,8 +144,8 @@ static inline void clear_intmask(struct icenet_device *nic, uint32_t mask)
 static inline void post_send_frag(
 		struct icenet_device *nic, skb_frag_t *frag, int last)
 {
-	uintptr_t addr = page_to_phys(frag->bv_page) + frag->bv_offset;
-	uint64_t len = frag->bv_len, partial = !last, packet;
+	uintptr_t addr = page_to_phys(skb_frag_page(frag)) + skb_frag_off(frag);
+	uint64_t len = skb_frag_size(frag), partial = !last, packet;
 
 	packet = (partial << 63) | (len << 48) | (addr & 0xffffffffffffL);
 	iowrite64(packet, nic->iomem + ICENET_SEND_REQ);
@@ -563,16 +564,15 @@ static int icenet_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int icenet_remove(struct platform_device *pdev)
+static void icenet_remove(struct platform_device *pdev)
 {
-	struct net_device *ndev;
-	struct icenet_device *nic;
+    struct net_device *ndev;
+    struct icenet_device *nic;
 
-	ndev = platform_get_drvdata(pdev);
-	nic = netdev_priv(ndev);
-	netif_napi_del(&nic->napi);
-	unregister_netdev(ndev);
-	return 0;
+    ndev = platform_get_drvdata(pdev);
+    nic = netdev_priv(ndev);
+    netif_napi_del(&nic->napi);
+    unregister_netdev(ndev);
 }
 
 static struct of_device_id icenet_of_match[] = {
